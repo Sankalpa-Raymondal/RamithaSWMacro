@@ -1,0 +1,395 @@
+' ManufacturingTables - SOLIDWORKS macro
+'
+' Makes one manufacturing table (.xlsx) per part, using LibreOffice (no Excel needed).
+'   1. A file dialog opens: select one or more parts (.SLDPRT), Ctrl+click for several.
+'   2. For each part it finds the part's drawing in the same folder (same name, or a drawing
+'      whose name contains the part name) and reads the Material from its title block.
+'   3. It writes "<Part name> - Manufacturing.xlsx" next to the part, with one row:
+'        Assembly / Part | Drawing Name | Quantity | Manufacturing Method Phase 1 / 2 / 3 |
+'        Material | Special Notes
+'      Fill in Quantity, the three phases and the notes yourself.
+'   If the file already exists it is rebuilt, and your Quantity, Phase 1-3 and Special
+'   Notes entries are kept.
+' Parts and drawings are opened read-only and never saved or changed.
+' Needs LibreOffice (https://www.libreoffice.org).
+
+Option Explicit
+
+Private Type OPENFILENAME
+    lStructSize As Long
+    hwndOwner As LongPtr
+    hInstance As LongPtr
+    lpstrFilter As String
+    lpstrCustomFilter As String
+    nMaxCustFilter As Long
+    nFilterIndex As Long
+    lpstrFile As String
+    nMaxFile As Long
+    lpstrFileTitle As String
+    nMaxFileTitle As Long
+    lpstrInitialDir As String
+    lpstrTitle As String
+    flags As Long
+    nFileOffset As Integer
+    nFileExtension As Integer
+    lpstrDefExt As String
+    lCustData As LongPtr
+    lpfnHook As LongPtr
+    lpTemplateName As String
+    pvReserved As LongPtr
+    dwReserved As Long
+    FlagsEx As Long
+End Type
+
+Private Declare PtrSafe Function GetOpenFileName Lib "comdlg32.dll" Alias "GetOpenFileNameA" (pOpenfilename As OPENFILENAME) As Long
+
+Const TITLE As String = "Manufacturing Tables"
+Const HEADER_ROW As Long = 3          ' 0-based row index = row 4 in the sheet
+Const DATA_ROW As Long = 4            ' row 5
+Const NAVY As Long = &H1F3864         ' LibreOffice colours are &HRRGGBB
+Const GREY As Long = &HBFBFBF
+Const BLUE As Long = &HFF&
+
+Dim swApp As Object
+Dim oSM As Object, oDesk As Object
+
+Sub main()
+    Set swApp = Application.SldWorks
+
+    Dim files() As String, n As Long
+    n = PickFiles(files, "SOLIDWORKS Parts (*.sldprt)", "*.sldprt", _
+                  "Select the parts for the manufacturing tables (Ctrl+click for several)")
+    If n = 0 Then Exit Sub
+
+    On Error Resume Next
+    Set oSM = CreateObject("com.sun.star.ServiceManager")
+    If Not oSM Is Nothing Then Set oDesk = oSM.createInstance("com.sun.star.frame.Desktop")
+    On Error GoTo 0
+    If oDesk Is Nothing Then
+        MsgBox "LibreOffice is needed for this macro but could not be started.", vbExclamation, TITLE
+        Exit Sub
+    End If
+
+    Dim startTitle As String
+    If Not swApp.ActiveDoc Is Nothing Then startTitle = swApp.ActiveDoc.GetTitle
+
+    Dim i As Long, ok As Long, report As String, msg As String
+    For i = 0 To n - 1
+        msg = DoPart(files(i))
+        If Left(msg, 6) <> "FAILED" Then ok = ok + 1
+        report = report & vbCrLf & "  " & msg
+    Next i
+
+    Dim e As Long
+    If startTitle <> "" Then swApp.ActivateDoc3 startTitle, False, 0, e
+
+    MsgBox ok & " of " & n & " manufacturing table(s) done:" & report, IIf(ok = n, vbInformation, vbExclamation), TITLE
+End Sub
+
+' ---------------------------------------------------------------------------------------
+' One part: read SOLIDWORKS data, write its .xlsx. Returns a report line.
+Private Function DoPart(partPath As String) As String
+    Dim e As Long, w As Long
+    Dim partName As String, folder As String
+    partName = BaseName(partPath)
+    folder = Left(partPath, InStrRev(partPath, "\"))
+
+    ' ---- part: SOLIDWORKS material (used if the drawing has none) ----
+    Dim swPart As Object, partWasOpen As Boolean, swMat As String, cfg As String, db As String
+    Set swPart = swApp.GetOpenDocumentByName(partPath)
+    partWasOpen = Not swPart Is Nothing
+    If Not partWasOpen Then Set swPart = swApp.OpenDoc6(partPath, 1, 1 + 2, "", e, w)   ' part, silent + read-only
+    If swPart Is Nothing Then
+        DoPart = "FAILED to open " & partName
+        Exit Function
+    End If
+    cfg = swPart.ConfigurationManager.ActiveConfiguration.Name
+    swMat = swPart.GetMaterialPropertyName2(cfg, db)
+
+    ' ---- drawing: name + title block material ----
+    Dim drwPath As String, drwName As String, tbMat As String
+    drwPath = FindDrawing(folder, partName)
+    If drwPath <> "" Then
+        drwName = BaseName(drwPath)
+        Dim swDrw As Object, drwWasOpen As Boolean
+        Set swDrw = swApp.GetOpenDocumentByName(drwPath)
+        drwWasOpen = Not swDrw Is Nothing
+        If Not drwWasOpen Then Set swDrw = swApp.OpenDoc6(drwPath, 3, 1 + 2, "", e, w)
+        If Not swDrw Is Nothing Then
+            tbMat = TitleBlockField(swDrw, "Material")
+            If Not drwWasOpen Then swApp.CloseDoc swDrw.GetTitle
+        End If
+    End If
+    If Not partWasOpen Then swApp.CloseDoc swPart.GetTitle
+
+    Dim material As String
+    material = IIf(tbMat <> "", tbMat, swMat)
+
+    ' ---- keep the user's entries from an existing file ----
+    Dim xlsPath As String, existed As Boolean
+    Dim qty As String, ph1 As String, ph2 As String, ph3 As String, notes As String
+    xlsPath = folder & partName & " - Manufacturing.xlsx"
+    existed = (Dir(xlsPath) <> "")
+    If existed Then
+        Dim old As Object
+        Set old = LoadDoc(xlsPath)
+        If old Is Nothing Then
+            DoPart = "FAILED: could not read " & FileName(xlsPath) & "  (is it open?)"
+            Exit Function
+        End If
+        Dim os As Object
+        Set os = old.getSheets().getByIndex(0)
+        qty = os.getCellByPosition(2, DATA_ROW).getString()
+        ph1 = os.getCellByPosition(3, DATA_ROW).getString()
+        ph2 = os.getCellByPosition(4, DATA_ROW).getString()
+        ph3 = os.getCellByPosition(5, DATA_ROW).getString()
+        notes = os.getCellByPosition(7, DATA_ROW).getString()
+        old.Close True
+    End If
+    If qty = "" Then qty = "1"
+
+    ' ---- write a fresh sheet ----
+    Dim doc As Object, sh As Object
+    Set doc = LoadDoc("")
+    Set sh = doc.getSheets().getByIndex(0)
+    sh.setName "Manufacturing"
+    BuildSheet sh, partName
+
+    SetText sh, 0, DATA_ROW, partName
+    SetText sh, 1, DATA_ROW, drwName
+    If IsNumeric(qty) Then sh.getCellByPosition(2, DATA_ROW).setValue CDbl(qty) Else SetText sh, 2, DATA_ROW, qty
+    SetText sh, 3, DATA_ROW, ph1
+    SetText sh, 4, DATA_ROW, ph2
+    SetText sh, 5, DATA_ROW, ph3
+    SetText sh, 6, DATA_ROW, material
+    SetText sh, 7, DATA_ROW, notes
+
+    Dim saved As Boolean
+    On Error Resume Next
+    Dim args(1) As Object
+    Set args(0) = PV("FilterName", "Calc MS Excel 2007 XML")
+    Set args(1) = PV("Overwrite", True)
+    doc.storeToURL ToURL(xlsPath), args
+    saved = (Err.Number = 0)
+    On Error GoTo 0
+    doc.Close True
+
+    If saved Then
+        DoPart = IIf(existed, "updated  ", "created  ") & FileName(xlsPath)
+    Else
+        DoPart = "FAILED to save " & FileName(xlsPath) & "  (is it open in LibreOffice?)"
+    End If
+End Function
+
+' ---------------------------------------------------------------------------------------
+' Layout and look copied from Woodpecker_BOM.xlsx
+Private Sub BuildSheet(sh As Object, partName As String)
+    Dim heads As Variant, widths As Variant, c As Long, cell As Object
+    heads = Array("Assembly / Part", "Drawing Name", "Quantity", "Manufacturing Method Phase 1", _
+                  "Manufacturing Method Phase 2", "Manufacturing Method Phase 3", "Material", "Special Notes")
+    widths = Array(6000, 6000, 2200, 4400, 4400, 4400, 4000, 8000)     ' 1/100 mm
+
+    ' title (A1): Arial 14 bold, rows 1-3 like the reference
+    Set cell = sh.getCellByPosition(0, 0)
+    cell.setString "Manufacturing Table " & ChrW(8211) & " " & partName
+    cell.setPropertyValue "CharFontName", "Arial"
+    cell.setPropertyValue "CharHeight", 14
+    cell.setPropertyValue "CharWeight", 150
+    cell.setPropertyValue "CharColor", 0
+    For c = 0 To 2
+        sh.getRows().getByIndex(c).setPropertyValue "Height", 612
+    Next c
+
+    For c = 0 To 7
+        sh.getColumns().getByIndex(c).setPropertyValue "Width", widths(c)
+
+        ' header (row 4): Arial 11 bold, white on navy, centred, wrapped, grey border
+        Set cell = sh.getCellByPosition(c, HEADER_ROW)
+        cell.setString heads(c)
+        cell.setPropertyValue "CharFontName", "Arial"
+        cell.setPropertyValue "CharHeight", 11
+        cell.setPropertyValue "CharWeight", 150
+        cell.setPropertyValue "CharColor", &HFFFFFF
+        cell.setPropertyValue "CellBackColor", NAVY
+        cell.setPropertyValue "IsTextWrapped", True
+        cell.setPropertyValue "HoriJustify", 2          ' CENTER
+        cell.setPropertyValue "VertJustify", 2          ' CENTER
+        Borders cell
+
+        ' data (row 5): Arial 11, top-left, wrapped, grey border; Quantity in blue (as Qty in the reference)
+        Set cell = sh.getCellByPosition(c, DATA_ROW)
+        cell.setPropertyValue "CharFontName", "Arial"
+        cell.setPropertyValue "CharHeight", 11
+        cell.setPropertyValue "CharColor", IIf(c = 2, BLUE, 0)
+        cell.setPropertyValue "IsTextWrapped", True
+        cell.setPropertyValue "HoriJustify", 0          ' STANDARD
+        cell.setPropertyValue "VertJustify", 1          ' TOP
+        Borders cell
+    Next c
+    sh.getRows().getByIndex(HEADER_ROW).setPropertyValue "Height", 947
+    sh.getRows().getByIndex(DATA_ROW).setPropertyValue "OptimalHeight", True
+End Sub
+
+Private Sub Borders(cell As Object)
+    Dim bl As Object
+    Set bl = oSM.Bridge_GetStruct("com.sun.star.table.BorderLine2")
+    bl.Color = GREY
+    bl.OuterLineWidth = 26
+    bl.LineWidth = 26
+    cell.setPropertyValue "TopBorder", bl
+    cell.setPropertyValue "BottomBorder", bl
+    cell.setPropertyValue "LeftBorder", bl
+    cell.setPropertyValue "RightBorder", bl
+End Sub
+
+Private Sub SetText(sh As Object, c As Long, r As Long, s As String)
+    sh.getCellByPosition(c, r).setString s
+End Sub
+
+' ---------------------------------------------------------------------------------------
+' LibreOffice helpers
+Private Function LoadDoc(path As String) As Object
+    Dim args(0) As Object
+    Set args(0) = PV("Hidden", True)
+    On Error Resume Next
+    If path = "" Then
+        Set LoadDoc = oDesk.loadComponentFromURL("private:factory/scalc", "_blank", 0, args)
+    Else
+        Set LoadDoc = oDesk.loadComponentFromURL(ToURL(path), "_blank", 0, args)
+    End If
+    On Error GoTo 0
+End Function
+
+Private Function PV(name As String, value As Variant) As Object
+    Set PV = oSM.Bridge_GetStruct("com.sun.star.beans.PropertyValue")
+    PV.Name = name
+    PV.Value = value
+End Function
+
+Private Function ToURL(path As String) As String
+    Dim s As String
+    s = Replace(path, "\", "/")
+    s = Replace(s, "%", "%25")
+    s = Replace(s, " ", "%20")
+    s = Replace(s, "#", "%23")
+    ToURL = "file:///" & s
+End Function
+
+' ---------------------------------------------------------------------------------------
+' Title block: the value of a "Label:" note, i.e. the text just right of it or just below it.
+' Border letters/numbers within 10 mm of the sheet edge are ignored.
+Private Function TitleBlockField(swDrw As Object, fieldName As String) As String
+    Dim sv As Object, nt As Object, cnt As Long
+    Dim tx() As Double, ty() As Double, tt() As String, isLab() As Boolean
+    ReDim tx(500): ReDim ty(500): ReDim tt(500): ReDim isLab(500)
+
+    Dim sp As Variant, sw_ As Double, sh_ As Double
+    sp = swDrw.GetCurrentSheet.GetProperties2
+    sw_ = sp(5) * 1000: sh_ = sp(6) * 1000
+
+    Set sv = swDrw.GetFirstView               ' the sheet itself (title block notes live here)
+    Set nt = sv.GetFirstNote
+    Do While Not nt Is Nothing And cnt <= 500
+        Dim p As Variant, s As String
+        p = nt.GetTextPoint2
+        s = Trim(Replace(nt.GetText, vbLf, ""))
+        If p(0) * 1000 > 10 And p(0) * 1000 < sw_ - 10 And p(1) * 1000 > 10 And p(1) * 1000 < sh_ - 10 Then
+            tx(cnt) = p(0) * 1000: ty(cnt) = p(1) * 1000: tt(cnt) = s
+            isLab(cnt) = (Len(s) > 1 And Right(s, 1) = ":" And InStr(s, vbCr) = 0)
+            cnt = cnt + 1
+        End If
+        Set nt = nt.GetNext
+    Loop
+
+    Dim i As Long, v As String
+    For i = 0 To cnt - 1
+        If isLab(i) Then
+            If LCase(Left(tt(i), Len(tt(i)) - 1)) = LCase(fieldName) Then
+                v = Collect(tx, ty, tt, isLab, cnt, tx(i) + 5, tx(i) + 40, ty(i) - 1.5, ty(i) + 1.5)       ' same line, right
+                If v = "" Then v = Collect(tx, ty, tt, isLab, cnt, tx(i) - 10, tx(i) + 25, ty(i) - 10, ty(i) - 1.5)  ' below
+                TitleBlockField = v
+                Exit Function
+            End If
+        End If
+    Next i
+End Function
+
+' Texts inside a box (mm), sorted left to right, joined with spaces
+Private Function Collect(tx() As Double, ty() As Double, tt() As String, isLab() As Boolean, cnt As Long, _
+                         x0 As Double, x1 As Double, y0 As Double, y1 As Double) As String
+    Dim idx() As Long, m As Long, j As Long, a As Long, b As Long, t As Long
+    ReDim idx(cnt)
+    For j = 0 To cnt - 1
+        If Not isLab(j) And tt(j) <> "" And InStr(tt(j), vbCr) = 0 Then
+            If tx(j) >= x0 And tx(j) <= x1 And ty(j) >= y0 And ty(j) <= y1 Then idx(m) = j: m = m + 1
+        End If
+    Next j
+    For a = 0 To m - 2
+        For b = a + 1 To m - 1
+            If tx(idx(b)) < tx(idx(a)) Then t = idx(a): idx(a) = idx(b): idx(b) = t
+        Next b
+    Next a
+    For a = 0 To m - 1
+        Collect = Collect & IIf(a > 0, " ", "") & tt(idx(a))
+    Next a
+End Function
+
+' Drawing for a part: "<part>.SLDDRW" in the same folder, else a drawing whose name contains the part name
+Private Function FindDrawing(folder As String, partName As String) As String
+    If Dir(folder & partName & ".SLDDRW") <> "" Then
+        FindDrawing = folder & partName & ".SLDDRW"
+        Exit Function
+    End If
+    Dim f As String
+    f = Dir(folder & "*.SLDDRW")
+    Do While f <> ""
+        If InStr(1, f, partName, vbTextCompare) > 0 And Left(f, 2) <> "~$" Then
+            FindDrawing = folder & f
+            Exit Function
+        End If
+        f = Dir
+    Loop
+End Function
+
+' ---------------------------------------------------------------------------------------
+' Windows file dialog (multi-select). Returns the number of files picked.
+Private Function PickFiles(files() As String, filterName As String, pattern As String, dlgTitle As String) As Long
+    Dim ofn As OPENFILENAME
+    ofn.lStructSize = LenB(ofn)
+    On Error Resume Next
+    ofn.hwndOwner = swApp.Frame.GetHWndx64
+    On Error GoTo 0
+    ofn.lpstrFilter = filterName & vbNullChar & pattern & vbNullChar & vbNullChar
+    ofn.nFilterIndex = 1
+    ofn.lpstrFile = String(65536, vbNullChar)
+    ofn.nMaxFile = Len(ofn.lpstrFile)
+    ofn.lpstrTitle = dlgTitle
+    ' OFN_EXPLORER, ALLOWMULTISELECT, FILEMUSTEXIST, PATHMUSTEXIST, HIDEREADONLY
+    ofn.flags = &H80000 Or &H200 Or &H1000 Or &H800 Or &H4
+    If GetOpenFileName(ofn) = 0 Then Exit Function
+
+    Dim buf As String, parts() As String, j As Long, folder As String
+    buf = Left(ofn.lpstrFile, InStr(ofn.lpstrFile, vbNullChar & vbNullChar) - 1)
+    parts = Split(buf, vbNullChar)
+    If UBound(parts) = 0 Then
+        ReDim files(0): files(0) = parts(0)
+        PickFiles = 1
+    Else
+        folder = parts(0)
+        If Right(folder, 1) <> "\" Then folder = folder & "\"
+        ReDim files(UBound(parts) - 1)
+        For j = 1 To UBound(parts)
+            files(j - 1) = folder & parts(j)
+        Next j
+        PickFiles = UBound(parts)
+    End If
+End Function
+
+Private Function FileName(p As String) As String
+    FileName = Mid(p, InStrRev(p, "\") + 1)
+End Function
+
+Private Function BaseName(p As String) As String
+    BaseName = FileName(p)
+    If InStrRev(BaseName, ".") > 0 Then BaseName = Left(BaseName, InStrRev(BaseName, ".") - 1)
+End Function

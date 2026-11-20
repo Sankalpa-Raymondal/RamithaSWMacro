@@ -6,6 +6,7 @@ SOLIDWORKS macros for engineering drawings.
 |---|---|
 | [DimensionsLightBlue](#dimensionslightblue) | Puts every dimension on a light-blue "Dimensions" layer with 1 decimal place |
 | [SavePDFs](#savepdfs) | Saves or updates PDFs of the drawings you select, with the same names as the drawings |
+| [ManufacturingTables](#manufacturingtables) | Makes one manufacturing table (.xlsx) per part, filled with the part name, drawing name and material |
 
 Each macro comes as three files in the `macros` folder:
 
@@ -40,6 +41,27 @@ Saves (or updates) PDFs of engineering drawings.
 The drawings are opened read-only and are never saved or changed. Drawings that were already open stay open; the others are closed again. If a PDF fails, it's usually open in a PDF viewer: close it and run the macro again.
 
 Tested on SOLIDWORKS 2026.
+
+## ManufacturingTables
+
+Makes **one manufacturing table (`.xlsx`) per part**. Uses **LibreOffice** (free), so Microsoft Excel isn't needed.
+
+1. Run the macro. A file dialog opens: select one or more parts (`.SLDPRT`), **Ctrl+click** for several, then click **Open**.
+2. For each part the macro looks for its drawing in the same folder: a drawing with the same name, or one whose name contains the part name.
+3. It writes `<Part name> - Manufacturing.xlsx` next to the part, in the same style as the project BOM:
+
+| Assembly / Part | Drawing Name | Quantity | Manufacturing Method Phase 1 | Manufacturing Method Phase 2 | Manufacturing Method Phase 3 | Material | Special Notes |
+|---|---|---|---|---|---|---|---|
+| part name | drawing name | 1 | | | | from the drawing's title block | |
+
+- **Material** is copied from the drawing's title block. If there's no drawing, the part's SOLIDWORKS material is used.
+- **Fill in yourself:** Quantity, Phase 1–3 (e.g. *Lathe/CNC Milling*, *Laser Cut*, *Sheet Metal Bending*, *Welding*, or anything else) and Special Notes.
+
+**Running it again** rebuilds the file with the latest drawing data and **keeps your Quantity, Phase 1–3 and Special Notes**. Close the file in LibreOffice before running the macro.
+
+Parts and drawings are opened read-only and are never saved or changed.
+
+Tested on SOLIDWORKS 2026 with LibreOffice.
 
 ## Installing and running a macro in SOLIDWORKS
 
@@ -91,7 +113,7 @@ The code is written and tested as a plain-text `.swb`, but each `.swp` is create
 **How a `.swp` is made (about 30 seconds):**
 
 1. In SOLIDWORKS: **Tools → Macro → New…**, save it in the `macros` folder as e.g. `SavePDFs.swp`. The VBA editor opens.
-2. Open the matching `.swb` in Notepad, select everything (**Ctrl+A**) and copy it (**Ctrl+C**).
+2. Open the matching **`.swb`** in Notepad (**not the `.bas`**: its first line, `Attribute VB_Name = ...`, is not valid in the editor and stops the macro from running), select everything (**Ctrl+A**) and copy it (**Ctrl+C**).
 3. In the VBA editor, click in the code window, select everything (**Ctrl+A**) and paste (**Ctrl+V**).
 4. Press **Ctrl+S** and close the VBA editor.
 
