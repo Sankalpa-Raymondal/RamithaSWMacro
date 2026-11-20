@@ -1,0 +1,139 @@
+' SavePDFs - SOLIDWORKS macro
+'
+' Saves (or updates) PDFs of engineering drawings.
+'   1. A file dialog opens: go to the folder and select one or more drawings
+'      (Ctrl+click / Shift+click / Ctrl+A to pick several).
+'   2. Each drawing is saved as a PDF with all its sheets, next to the drawing and with
+'      the same name (Rail guide.SLDDRW -> Rail guide.pdf). An existing PDF is overwritten.
+' Drawings are opened read-only and never saved or changed. Drawings that were already
+' open stay open; the others are closed again.
+
+Option Explicit
+
+Private Type OPENFILENAME
+    lStructSize As Long
+    hwndOwner As LongPtr
+    hInstance As LongPtr
+    lpstrFilter As String
+    lpstrCustomFilter As String
+    nMaxCustFilter As Long
+    nFilterIndex As Long
+    lpstrFile As String
+    nMaxFile As Long
+    lpstrFileTitle As String
+    nMaxFileTitle As Long
+    lpstrInitialDir As String
+    lpstrTitle As String
+    flags As Long
+    nFileOffset As Integer
+    nFileExtension As Integer
+    lpstrDefExt As String
+    lCustData As LongPtr
+    lpfnHook As LongPtr
+    lpTemplateName As String
+    pvReserved As LongPtr
+    dwReserved As Long
+    FlagsEx As Long
+End Type
+
+Private Declare PtrSafe Function GetOpenFileName Lib "comdlg32.dll" Alias "GetOpenFileNameA" (pOpenfilename As OPENFILENAME) As Long
+
+Const TITLE As String = "Save PDFs"
+Dim swApp As Object
+
+Sub main()
+    Set swApp = Application.SldWorks
+
+    Dim files() As String, n As Long
+    n = PickDrawings(files)
+    If n = 0 Then Exit Sub
+
+    ' remember the active document so we can go back to it
+    Dim startTitle As String
+    If Not swApp.ActiveDoc Is Nothing Then startTitle = swApp.ActiveDoc.GetTitle
+
+    ' PDF settings: every sheet of the drawing
+    Dim pdfData As Object
+    Set pdfData = swApp.GetExportFileData(1)                 ' 1 = swExportPdfData
+    If Not pdfData Is Nothing Then pdfData.SetSheets 1, Empty ' 1 = swExportData_ExportAllSheets
+
+    Dim i As Long, ok As Long, report As String
+    Dim swModel As Object, wasOpen As Boolean, pdfPath As String
+    Dim e As Long, w As Long, saved As Boolean
+
+    For i = 0 To n - 1
+        Set swModel = swApp.GetOpenDocumentByName(files(i))
+        wasOpen = Not swModel Is Nothing
+        If Not wasOpen Then
+            e = 0: w = 0
+            ' 3 = swDocDRAWING ; 1 + 2 = swOpenDocOptions_Silent + ReadOnly
+            Set swModel = swApp.OpenDoc6(files(i), 3, 1 + 2, "", e, w)
+        End If
+
+        If swModel Is Nothing Then
+            report = report & vbCrLf & "  FAILED to open: " & FileName(files(i))
+        Else
+            swApp.ActivateDoc3 swModel.GetTitle, False, 0, e
+            pdfPath = Left(files(i), InStrRev(files(i), ".")) & "pdf"
+            e = 0: w = 0
+            ' 0 = current version ; 1 + 2 = swSaveAsOptions_Silent + Copy (the drawing keeps its own name)
+            saved = swModel.Extension.SaveAs(pdfPath, 0, 1 + 2, pdfData, e, w)
+            If saved Then
+                ok = ok + 1
+                report = report & vbCrLf & "  " & FileName(pdfPath)
+            Else
+                report = report & vbCrLf & "  FAILED: " & FileName(pdfPath) & "  (is the PDF open in another program?)"
+            End If
+            If Not wasOpen Then swApp.CloseDoc swModel.GetTitle
+        End If
+    Next i
+
+    If startTitle <> "" Then swApp.ActivateDoc3 startTitle, False, 0, e
+
+    MsgBox ok & " of " & n & " PDF(s) saved:" & report, IIf(ok = n, vbInformation, vbExclamation), TITLE
+End Sub
+
+' Shows the Windows file dialog (multi-select). Returns the number of files picked.
+Private Function PickDrawings(files() As String) As Long
+    Dim ofn As OPENFILENAME
+    ofn.lStructSize = LenB(ofn)
+    On Error Resume Next
+    ofn.hwndOwner = swApp.Frame.GetHWndx64
+    On Error GoTo 0
+    ofn.lpstrFilter = "SOLIDWORKS Drawings (*.slddrw)" & vbNullChar & "*.slddrw" & vbNullChar & vbNullChar
+    ofn.nFilterIndex = 1
+    ofn.lpstrFile = String(65536, vbNullChar)
+    ofn.nMaxFile = Len(ofn.lpstrFile)
+    ofn.lpstrTitle = "Select the drawings to save as PDF (Ctrl+click for several)"
+    ' OFN_EXPLORER, ALLOWMULTISELECT, FILEMUSTEXIST, PATHMUSTEXIST, HIDEREADONLY
+    ofn.flags = &H80000 Or &H200 Or &H1000 Or &H800 Or &H4
+
+    If GetOpenFileName(ofn) = 0 Then
+        PickDrawings = 0
+        Exit Function
+    End If
+
+    ' result: "folder\0file1\0file2\0\0" (several) or "full path\0\0" (one)
+    Dim buf As String, parts() As String, k As Long, cnt As Long
+    buf = Left(ofn.lpstrFile, InStr(ofn.lpstrFile, vbNullChar & vbNullChar) - 1)
+    parts = Split(buf, vbNullChar)
+    If UBound(parts) = 0 Then
+        ReDim files(0)
+        files(0) = parts(0)
+        cnt = 1
+    Else
+        Dim folder As String
+        folder = parts(0)
+        If Right(folder, 1) <> "\" Then folder = folder & "\"
+        ReDim files(UBound(parts) - 1)
+        For k = 1 To UBound(parts)
+            files(k - 1) = folder & parts(k)
+        Next k
+        cnt = UBound(parts)
+    End If
+    PickDrawings = cnt
+End Function
+
+Private Function FileName(p As String) As String
+    FileName = Mid(p, InStrRev(p, "\") + 1)
+End Function
