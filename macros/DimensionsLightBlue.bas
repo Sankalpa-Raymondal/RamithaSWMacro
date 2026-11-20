@@ -1,0 +1,94 @@
+Attribute VB_Name = "DimensionsLightBlue1"
+' DimensionsLightBlue - SOLIDWORKS drawing macro
+'
+' Run with a drawing open:  Tools > Macro > Run > DimensionsLightBlue.swb
+'
+' For the active drawing (all sheets) it:
+'   1. Creates a "Dimensions" layer in light blue (RGB 83,169,255) if it is missing.
+'   2. Document Properties > Dimensions: layer = "Dimensions"; 1 decimal place for
+'      lengths, angles and tolerances, so NEW dimensions come out the same way.
+'   3. Every existing dimension: moved to the "Dimensions" layer, coloured light blue,
+'      1 decimal place (value and tolerance).
+' Nothing else (notes, welds, centre lines, title block) is changed. The drawing is not saved.
+
+Const LAYER_NAME As String = "Dimensions"
+
+Dim swApp As Object
+
+Sub main()
+    Set swApp = Application.SldWorks
+    Dim swModel As Object
+    Set swModel = swApp.ActiveDoc
+    If swModel Is Nothing Then
+        MsgBox "Open a drawing first.", vbExclamation, "Dimensions Light Blue"
+        Exit Sub
+    End If
+    If swModel.GetType <> 3 Then        ' 3 = swDocDRAWING
+        MsgBox "The active document is not a drawing.", vbExclamation, "Dimensions Light Blue"
+        Exit Sub
+    End If
+
+    Dim lightBlue As Long
+    lightBlue = RGB(83, 169, 255)
+
+    ' ---- 1. layer -------------------------------------------------------------------
+    Dim lm As Object
+    Set lm = swModel.GetLayerManager
+    Dim lay As Object
+    Set lay = lm.GetLayer(LAYER_NAME)
+    If lay Is Nothing Then
+        lm.AddLayer LAYER_NAME, "Dimensions", lightBlue, 0, 0
+        Set lay = lm.GetLayer(LAYER_NAME)
+    Else
+        lay.Color = lightBlue
+    End If
+
+    ' ---- 2. document properties (new dimensions) ----------------------------------------
+    ' Numbers are the SOLIDWORKS API constants, so no type-library reference is needed:
+    '   swDetailingLayer = 63, swDetailingLinearDimPrecision = 24, swDetailingAngularDimPrecision = 28,
+    '   swDetailingLinearTolPrecision = 25, swDetailingAngularTolPrecision = 29
+    '   dimension types: Dimension 200, Angle 201, ArcLength 202, Chamfer 203, Diameter 204,
+    '                    Hole 205, Linear 206, Ordinate 207, Radius 208
+    Dim ext As Object
+    Set ext = swModel.Extension
+    Dim opt As Integer
+    For opt = 200 To 208
+        ext.SetUserPreferenceString 63, opt, LAYER_NAME
+        ext.SetUserPreferenceInteger 24, opt, 1
+        ext.SetUserPreferenceInteger 28, opt, 1
+        ext.SetUserPreferenceInteger 25, opt, 1
+        ext.SetUserPreferenceInteger 29, opt, 1
+    Next opt
+
+    ' ---- 3. existing dimensions on every sheet ----------------------------------------
+    Dim sheetViews As Variant, views As Variant
+    Dim s As Integer, v As Integer
+    Dim swView As Object, dd As Object, ann As Object
+    Dim n As Long
+    n = 0
+    sheetViews = swModel.GetViews
+    If Not IsEmpty(sheetViews) Then
+        For s = LBound(sheetViews) To UBound(sheetViews)
+            views = sheetViews(s)
+            ' index 0 is the sheet itself: skip it, its hidden sheet-format/sketch dimensions must stay as they are
+            For v = LBound(views) + 1 To UBound(views)
+                Set swView = views(v)
+                Set dd = swView.GetFirstDisplayDimension5
+                Do While Not dd Is Nothing
+                    Set ann = dd.GetAnnotation
+                    ann.Layer = LAYER_NAME
+                    ann.Color = lightBlue
+                    dd.SetPrecision3 1, 1, 1, 1           ' value, dual value, tolerance, dual tolerance
+                    n = n + 1
+                    Set dd = dd.GetNext5
+                Loop
+            Next v
+        Next s
+    End If
+
+    swModel.ForceRebuild3 False
+    swModel.GraphicsRedraw2
+    MsgBox n & " dimension(s) set to the """ & LAYER_NAME & """ layer, light blue, 1 decimal place." & vbCrLf & _
+           "New dimensions in this drawing will follow the same settings." & vbCrLf & _
+           "Save the drawing to keep the changes.", vbInformation, "Dimensions Light Blue"
+End Sub
