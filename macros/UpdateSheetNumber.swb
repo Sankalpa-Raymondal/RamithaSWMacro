@@ -1,0 +1,114 @@
+' UpdateSheetNumber - SOLIDWORKS drawing macro
+'
+' Writes the sheet number into the title block of every sheet of the active drawing:
+' sheet 1 -> "01", sheet 2 -> "02", ... (the order of the sheet tabs).
+'   - Finds the "Sheet:" label in the title block and fills the value box next to it
+'     (just right of the label, or just below it).
+'   - Run it again after adding, deleting or reordering sheets to renumber them.
+' The drawing is not saved.
+
+Option Explicit
+
+Const TITLE As String = "Update Sheet Number"
+
+Dim swApp As Object, swModel As Object
+
+Sub main()
+    On Error GoTo failed
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    If swModel Is Nothing Then
+        MsgBox "Open a drawing first.", vbExclamation, TITLE: Exit Sub
+    End If
+    If swModel.GetType <> 3 Then
+        MsgBox "The active document is not a drawing.", vbExclamation, TITLE: Exit Sub
+    End If
+
+    Dim names As Variant, startSheet As String, i As Long, report As String, ok As Long, num As String
+    names = swModel.GetSheetNames
+    startSheet = swModel.GetCurrentSheet.GetName
+
+    For i = LBound(names) To UBound(names)
+        num = Format(i - LBound(names) + 1, "00")
+        swModel.ActivateSheet names(i)
+        If SetSheetField(num) Then
+            ok = ok + 1
+            report = report & vbCrLf & "  " & names(i) & ":  " & num
+        Else
+            report = report & vbCrLf & "  " & names(i) & ":  no ""Sheet:"" box found in the title block"
+        End If
+    Next i
+
+    swModel.ActivateSheet startSheet
+    swModel.ForceRebuild3 False
+    swModel.GraphicsRedraw2
+    MsgBox ok & " of " & (UBound(names) - LBound(names) + 1) & " sheet(s) numbered:" & report & vbCrLf & vbCrLf & _
+           "Save the drawing to keep the changes.", IIf(ok > 0, vbInformation, vbExclamation), TITLE
+    Exit Sub
+failed:
+    On Error Resume Next
+    swModel.EditSheet
+    MsgBox "Stopped by an error: " & Err.Description & " (" & Err.Number & ")", vbExclamation, TITLE
+End Sub
+
+' Current sheet: write num into the value box of the "Sheet:" label. True if done.
+Private Function SetSheetField(num As String) As Boolean
+    Dim sp As Variant, sw_ As Double, sh_ As Double
+    sp = swModel.GetCurrentSheet.GetProperties2
+    sw_ = sp(5) * 1000: sh_ = sp(6) * 1000             ' sheet size, mm
+
+    swModel.EditTemplate                                 ' title block notes live in the sheet format
+
+    ' all notes on the sheet (not near the border), with position in mm
+    Dim nts() As Object, tx() As Double, ty() As Double, tt() As String, isLab() As Boolean, cnt As Long
+    ReDim nts(500): ReDim tx(500): ReDim ty(500): ReDim tt(500): ReDim isLab(500)
+    Dim nt As Object, p As Variant, s As String
+    Set nt = swModel.GetFirstView.GetFirstNote
+    Do While Not nt Is Nothing And cnt <= 500
+        p = nt.GetTextPoint2
+        s = Trim(Replace(nt.GetText, vbLf, ""))
+        If p(0) * 1000 > 10 And p(0) * 1000 < sw_ - 10 And p(1) * 1000 > 10 And p(1) * 1000 < sh_ - 10 Then
+            Set nts(cnt) = nt
+            tx(cnt) = p(0) * 1000: ty(cnt) = p(1) * 1000: tt(cnt) = s
+            isLab(cnt) = (Len(s) > 1 And Right(s, 1) = ":" And InStr(s, vbCr) = 0)
+            cnt = cnt + 1
+        End If
+        Set nt = nt.GetNext
+    Loop
+
+    Dim i As Long, j As Long, best As Long, d As Double, bestD As Double, lab As String
+    For i = 0 To cnt - 1
+        If isLab(i) Then
+            lab = LCase(Trim(Left(tt(i), Len(tt(i)) - 1)))
+            If lab = "sheet" Or lab = "sheet no" Or lab = "sheet no." Or lab = "sheet number" Then
+                ' value box: nearest non-label note just right of the label, else just below it
+                best = -1: bestD = 1E+99
+                For j = 0 To cnt - 1
+                    If Not isLab(j) And InStr(tt(j), vbCr) = 0 Then
+                        If tx(j) >= tx(i) + 2 And tx(j) <= tx(i) + 40 And Abs(ty(j) - ty(i)) <= 1.5 Then
+                            d = tx(j) - tx(i)
+                            If d < bestD Then bestD = d: best = j
+                        End If
+                    End If
+                Next j
+                If best < 0 Then
+                    For j = 0 To cnt - 1
+                        If Not isLab(j) And InStr(tt(j), vbCr) = 0 Then
+                            If tx(j) >= tx(i) - 10 And tx(j) <= tx(i) + 25 And ty(j) >= ty(i) - 10 And ty(j) <= ty(i) - 1.5 Then
+                                d = Sqr((tx(j) - tx(i)) ^ 2 + (ty(j) - ty(i)) ^ 2)
+                                If d < bestD Then bestD = d: best = j
+                            End If
+                        End If
+                    Next j
+                End If
+                If best >= 0 Then
+                    nts(best).SetText num
+                    SetSheetField = True
+                End If
+                Exit For
+            End If
+        End If
+    Next i
+
+    swModel.EditSheet
+End Function

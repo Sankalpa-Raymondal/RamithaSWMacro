@@ -7,6 +7,8 @@ SOLIDWORKS macros for engineering drawings.
 | [DimensionsLightBlue](#dimensionslightblue) | Puts every dimension on a light-blue "Dimensions" layer with 1 decimal place |
 | [SavePDFs](#savepdfs) | Saves or updates PDFs of the drawings you select, with the same names as the drawings |
 | [ManufacturingTables](#manufacturingtables) | Makes one manufacturing table (.xlsx) per part, filled with the part name, drawing name and material |
+| [SymmetryCenterlines](#symmetrycenterlines) | Finds symmetric views and adds a black centre line with the centre-line symbol |
+| [UpdateSheetNumber](#updatesheetnumber) | Writes the sheet number (01, 02, ...) into the title block of every sheet |
 
 Each macro comes as three files in the `macros` folder:
 
@@ -62,6 +64,32 @@ Makes **one manufacturing table (`.xlsx`) per part**. Uses **LibreOffice** (free
 Parts and drawings are opened read-only and are never saved or changed.
 
 Tested on SOLIDWORKS 2026 with LibreOffice.
+
+## SymmetryCenterlines
+
+Finds symmetric drawing views and adds a centre line to each symmetry axis.
+
+1. Open a drawing. Select the views to check (Ctrl+click), or select nothing to check every view on the sheet.
+2. Run the macro. For each view it checks left/right and top/bottom symmetry: every line end and arc/hole centre must have a mirror partner.
+3. For each symmetry axis it draws a **centre line** across the whole view (Center line style, **black**, on the **Text** layer) and puts the **centre-line symbol** at its end. Both belong to the view, so they move with it.
+
+- Axes that already have a centre line (sketch line or Centerline annotation) are skipped, so it's safe to run again.
+- Isometric and other non-straight-on views are skipped; rotated views (e.g. a flat pattern turned 90°) are handled.
+- A message lists each view and what was done. The drawing is not saved.
+
+Tested on SOLIDWORKS 2026.
+
+## UpdateSheetNumber
+
+Writes the sheet number into the title block of every sheet: sheet 1 → `01`, sheet 2 → `02`, ... in the order of the sheet tabs.
+
+1. Open a drawing and run the macro.
+2. On each sheet it finds the **Sheet:** label in the title block and fills the box next to it.
+3. A message lists each sheet and its number.
+
+Run it again after adding, deleting or reordering sheets. The drawing is not saved.
+
+Tested on SOLIDWORKS 2026.
 
 ## Installing and running a macro in SOLIDWORKS
 

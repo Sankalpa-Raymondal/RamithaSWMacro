@@ -1,0 +1,314 @@
+Attribute VB_Name = "SymmetryCenterlines1"
+' SymmetryCenterlines - SOLIDWORKS drawing macro
+'
+' Finds drawing views that are symmetric and adds a black centre line with the
+' centre-line symbol to each symmetry axis.
+'   - Works on the selected views, or on every view of the current sheet if none is selected.
+'   - Checks each view for left/right symmetry (vertical axis) and top/bottom symmetry
+'     (horizontal axis): every line end and arc/hole centre must have a mirror partner.
+'   - For each axis found it draws a centre line across the whole view (+3 mm each side),
+'     in Center line style, black, on the "Text" layer, and puts the centre-line symbol
+'     at its end. Both belong to the view, so they move with it.
+'   - Axes that already have a centre line are skipped, so it is safe to run again.
+'   - Isometric/rotated views are skipped.
+' The drawing is not saved.
+
+Option Explicit
+
+Const TITLE As String = "Symmetry Centre Lines"
+Const TOL As Double = 0.2        ' mm on the sheet: how close a mirrored point must be
+Const MIN_MATCH As Double = 0.97 ' fraction of points that must have a mirror partner
+Const EXT As Double = 3          ' mm the centre line sticks out past the view
+Const LAYER_NAME As String = "Text"
+
+Dim swApp As Object, swModel As Object
+Dim px() As Double, py() As Double, np As Long
+
+Sub main()
+    On Error GoTo failed
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    If swModel Is Nothing Then
+        MsgBox "Open a drawing first.", vbExclamation, TITLE: Exit Sub
+    End If
+    If swModel.GetType <> 3 Then
+        MsgBox "The active document is not a drawing.", vbExclamation, TITLE: Exit Sub
+    End If
+
+    ' views: the selected ones, else all on the current sheet
+    Dim views() As Object, nv As Long, i As Long
+    ReDim views(0)
+    Dim sm As Object
+    Set sm = swModel.SelectionManager
+    For i = 1 To sm.GetSelectedObjectCount2(-1)
+        If sm.GetSelectedObjectType3(i, -1) = 12 Then        ' swSelDRAWINGVIEWS
+            ReDim Preserve views(nv): Set views(nv) = sm.GetSelectedObject6(i, -1): nv = nv + 1
+        End If
+    Next i
+    If nv = 0 Then
+        Dim v As Object
+        Set v = swModel.GetFirstView.GetNextView
+        Do While Not v Is Nothing
+            ReDim Preserve views(nv): Set views(nv) = v: nv = nv + 1
+            Set v = v.GetNextView
+        Loop
+    End If
+    If nv = 0 Then
+        MsgBox "No drawing views found.", vbExclamation, TITLE: Exit Sub
+    End If
+
+    Dim report As String, added As Long
+    For i = 0 To nv - 1
+        report = report & vbCrLf & "  " & DoView(views(i), added)
+    Next i
+
+    swModel.ClearSelection2 True
+    swModel.GraphicsRedraw2
+    MsgBox added & " centre line(s) added:" & report & vbCrLf & vbCrLf & _
+           "Save the drawing to keep them.", vbInformation, TITLE
+    Exit Sub
+failed:
+    MsgBox "Stopped by an error: " & Err.Description & " (" & Err.Number & ")", vbExclamation, TITLE
+End Sub
+
+' ---------------------------------------------------------------------------------------
+Private Function DoView(v As Object, added As Long) As String
+    Dim nm As String
+    nm = v.Name
+    Dim a As Variant
+    a = v.ModelToViewTransform.ArrayData
+    ' orthographic only: the view direction must be along a model axis
+    If Abs(Abs(a(2)) - 1) > 0.0001 And Abs(Abs(a(5)) - 1) > 0.0001 And Abs(Abs(a(8)) - 1) > 0.0001 Then
+        DoView = nm & ": skipped (not a straight-on view)"
+        Exit Function
+    End If
+
+    CollectPoints v, a
+    If np < 4 Then
+        DoView = nm & ": skipped (no geometry found)"
+        Exit Function
+    End If
+
+    Dim x0 As Double, x1 As Double, y0 As Double, y1 As Double, k As Long
+    x0 = px(0): x1 = px(0): y0 = py(0): y1 = py(0)
+    For k = 1 To np - 1
+        If px(k) < x0 Then x0 = px(k)
+        If px(k) > x1 Then x1 = px(k)
+        If py(k) < y0 Then y0 = py(k)
+        If py(k) > y1 Then y1 = py(k)
+    Next k
+
+    Dim cx As Double, cy As Double, res As String
+    cx = (x0 + x1) / 2: cy = (y0 + y1) / 2
+
+    If x1 - x0 > 1 Then
+        If MirrorScore(True, cx) >= MIN_MATCH Then
+            If HasCentreLine(v, True, cx) Then
+                res = res & ", vertical axis already has a centre line"
+            Else
+                AddCentreLine v, True, cx, y0 - EXT, y1 + EXT
+                added = added + 1
+                res = res & ", vertical centre line added"
+            End If
+        End If
+    End If
+    If y1 - y0 > 1 Then
+        If MirrorScore(False, cy) >= MIN_MATCH Then
+            If HasCentreLine(v, False, cy) Then
+                res = res & ", horizontal axis already has a centre line"
+            Else
+                AddCentreLine v, False, cy, x0 - EXT, x1 + EXT
+                added = added + 1
+                res = res & ", horizontal centre line added"
+            End If
+        End If
+    End If
+    If res = "" Then res = ", not symmetric"
+    DoView = nm & ":" & Mid(res, 2)
+End Function
+
+' Key points of the visible edges, in sheet mm: line ends, arc ends, arc/circle centres
+Private Sub CollectPoints(v As Object, a As Variant)
+    np = 0
+    ReDim px(1000): ReDim py(1000)
+    Dim comps As Variant, ci As Long, comp As Object, ents As Variant, j As Long
+    comps = v.GetVisibleComponents
+    If IsEmpty(comps) Then
+        ents = v.GetVisibleEntities2(Nothing, 1)        ' 1 = edges
+        AddEdges ents, a
+    Else
+        For ci = LBound(comps) To UBound(comps)
+            Set comp = comps(ci)
+            ents = v.GetVisibleEntities2(comp, 1)
+            AddEdges ents, a
+        Next ci
+    End If
+End Sub
+
+Private Sub AddEdges(ents As Variant, a As Variant)
+    If IsEmpty(ents) Then Exit Sub
+    Dim j As Long, ed As Object, cv As Object, sv As Object, evx As Object, cp As Variant
+    For j = LBound(ents) To UBound(ents)
+        Set ed = ents(j)
+        Set cv = ed.GetCurve
+        Set sv = ed.GetStartVertex
+        Set evx = ed.GetEndVertex
+        If cv.IsLine Then
+            If Not sv Is Nothing And Not evx Is Nothing Then
+                AddPt sv.GetPoint, a
+                AddPt evx.GetPoint, a
+            End If
+        ElseIf cv.IsCircle Then
+            cp = cv.CircleParams
+            AddPt Array(cp(0), cp(1), cp(2)), a
+            If Not sv Is Nothing Then AddPt sv.GetPoint, a
+            If Not evx Is Nothing Then AddPt evx.GetPoint, a
+        Else
+            If Not sv Is Nothing Then AddPt sv.GetPoint, a
+            If Not evx Is Nothing Then AddPt evx.GetPoint, a
+        End If
+    Next j
+End Sub
+
+' model point (m) -> sheet point (mm): p' = (p . R) * scale + T
+Private Sub AddPt(p As Variant, a As Variant)
+    If np > UBound(px) Then ReDim Preserve px(np * 2): ReDim Preserve py(np * 2)
+    px(np) = ((p(0) * a(0) + p(1) * a(3) + p(2) * a(6)) * a(12) + a(9)) * 1000
+    py(np) = ((p(0) * a(1) + p(1) * a(4) + p(2) * a(7)) * a(12) + a(10)) * 1000
+    np = np + 1
+End Sub
+
+' fraction of points with a mirror partner about x = c (vertical) or y = c (horizontal)
+Private Function MirrorScore(vertical As Boolean, c As Double) As Double
+    Dim i As Long, j As Long, mx As Double, my As Double, ok As Long
+    For i = 0 To np - 1
+        If vertical Then
+            mx = 2 * c - px(i): my = py(i)
+        Else
+            mx = px(i): my = 2 * c - py(i)
+        End If
+        For j = 0 To np - 1
+            If Abs(px(j) - mx) < TOL Then
+                If Abs(py(j) - my) < TOL Then ok = ok + 1: Exit For
+            End If
+        Next j
+    Next i
+    MirrorScore = ok / np
+End Function
+
+' ---------------------------------------------------------------------------------------
+' Is there already a centre line on this axis in the view?
+' (a Centerline annotation, or a sketch line in Center line style)
+Private Function HasCentreLine(v As Object, vertical As Boolean, c As Double) As Boolean
+    Dim sk As Object, segs As Variant, i As Long, s As Object, p0 As Object, p1 As Object
+    Dim xf As Variant, ax As Double, ay As Double, bx As Double, by As Double
+
+    ' Centerline annotations: their drawn line, in sheet metres, is at items 4-9 of the display data
+    Dim anns As Variant, an As Object, dd As Object, li As Long, r As Variant
+    anns = v.GetAnnotations
+    If Not IsEmpty(anns) Then
+        For i = LBound(anns) To UBound(anns)
+            Set an = anns(i)
+            If an.GetType = 15 Then                         ' swCenterLine
+                Set dd = an.GetDisplayData
+                If Not dd Is Nothing Then
+                    For li = 0 To dd.GetLineCount - 1
+                        r = dd.GetLineAtIndex3(li)
+                        ax = r(4) * 1000: ay = r(5) * 1000: bx = r(7) * 1000: by = r(8) * 1000
+                        If vertical Then
+                            If Abs(ax - c) < 0.5 And Abs(bx - c) < 0.5 Then HasCentreLine = True: Exit Function
+                        Else
+                            If Abs(ay - c) < 0.5 And Abs(by - c) < 0.5 Then HasCentreLine = True: Exit Function
+                        End If
+                    Next li
+                End If
+            End If
+        Next i
+    End If
+
+    ' sketch lines in Center style
+    Set sk = v.GetSketch
+    If sk Is Nothing Then Exit Function
+    segs = sk.GetSketchSegments
+    If IsEmpty(segs) Then Exit Function
+    For i = LBound(segs) To UBound(segs)
+        Set s = segs(i)
+        If s.GetType = 0 And s.Style = 4 Then           ' line, Center style
+            Set p0 = s.GetStartPoint2: Set p1 = s.GetEndPoint2
+            SketchToSheet v, p0.X, p0.Y, ax, ay
+            SketchToSheet v, p1.X, p1.Y, bx, by
+            If vertical Then
+                If Abs(ax - c) < 0.5 And Abs(bx - c) < 0.5 Then HasCentreLine = True: Exit Function
+            Else
+                If Abs(ay - c) < 0.5 And Abs(by - c) < 0.5 Then HasCentreLine = True: Exit Function
+            End If
+        End If
+    Next i
+End Function
+
+' Centre line (view sketch, Center style, black, Text layer) + centre-line symbol at its end
+Private Sub AddCentreLine(v As Object, vertical As Boolean, c As Double, s0 As Double, s1 As Double)
+    Dim ax As Double, ay As Double, bx As Double, by As Double
+    If vertical Then
+        ax = c: ay = s0: bx = c: by = s1
+    Else
+        ax = s0: ay = c: bx = s1: by = c
+    End If
+
+    swModel.ActivateView v.Name
+    Dim skm As Object, seg As Object
+    Set skm = swModel.SketchManager
+    skm.AddToDB = True
+    Dim sax As Double, say As Double, sbx As Double, sby As Double
+    SheetToSketch v, ax, ay, sax, say
+    SheetToSketch v, bx, by, sbx, sby
+    Set seg = skm.CreateLine(sax, say, 0, sbx, sby, 0)
+    skm.AddToDB = False
+    swModel.ClearSelection2 True
+    If seg Is Nothing Then Exit Sub
+
+    seg.Select4 False, Nothing
+    swModel.SetLineStyle "Center"
+    swModel.SetLineColor 0
+    swModel.ClearSelection2 True
+    On Error Resume Next
+    If Not swModel.GetLayerManager.GetLayer(LAYER_NAME) Is Nothing Then seg.Layer = LAYER_NAME
+    seg.Color = 0
+    On Error GoTo 0
+
+    ' centre-line symbol just past the end of the line (top end / right end)
+    Dim nt As Object, ann As Object, nx As Double, ny As Double
+    swModel.ActivateView v.Name
+    Set nt = swModel.InsertNote("<MOD-CL>")
+    If nt Is Nothing Then Exit Sub
+    Set ann = nt.GetAnnotation
+    On Error Resume Next
+    If Not swModel.GetLayerManager.GetLayer(LAYER_NAME) Is Nothing Then ann.Layer = LAYER_NAME
+    ann.Color = 0
+    nt.SetTextJustification 2                         ' centred
+    On Error GoTo 0
+    If vertical Then
+        nx = c: ny = s1 + 5                              ' note position = top of the text
+    Else
+        nx = s1 + 3: ny = c + 2
+    End If
+    ann.SetPosition2 nx / 1000, ny / 1000, 0
+    swModel.ClearSelection2 True
+End Sub
+
+' ---------------------------------------------------------------------------------------
+' View sketch (m, view's own axes) <-> sheet (mm). Handles the view position, scale and rotation.
+Private Sub SheetToSketch(v As Object, x As Double, y As Double, sx As Double, sy As Double)
+    Dim xf As Variant, ang As Double, dx As Double, dy As Double
+    xf = v.GetXform: ang = v.Angle
+    dx = (x / 1000 - xf(0)) / xf(2): dy = (y / 1000 - xf(1)) / xf(2)
+    sx = dx * Cos(ang) + dy * Sin(ang)
+    sy = -dx * Sin(ang) + dy * Cos(ang)
+End Sub
+
+Private Sub SketchToSheet(v As Object, sx As Double, sy As Double, x As Double, y As Double)
+    Dim xf As Variant, ang As Double
+    xf = v.GetXform: ang = v.Angle
+    x = ((sx * Cos(ang) - sy * Sin(ang)) * xf(2) + xf(0)) * 1000
+    y = ((sx * Sin(ang) + sy * Cos(ang)) * xf(2) + xf(1)) * 1000
+End Sub
