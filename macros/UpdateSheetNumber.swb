@@ -46,9 +46,11 @@ Sub main()
            "Save the drawing to keep the changes.", IIf(ok > 0, vbInformation, vbExclamation), TITLE
     Exit Sub
 failed:
+    Dim errText As String
+    errText = Err.Description & " (" & Err.Number & ")"
     On Error Resume Next
     swModel.EditSheet
-    MsgBox "Stopped by an error: " & Err.Description & " (" & Err.Number & ")", vbExclamation, TITLE
+    MsgBox "Stopped by an error: " & errText, vbExclamation, TITLE
 End Sub
 
 ' Current sheet: write num into the value box of the "Sheet:" label. True if done.

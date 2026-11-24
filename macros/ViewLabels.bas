@@ -1,0 +1,283 @@
+Attribute VB_Name = "ViewLabels1"
+' ViewLabels - SOLIDWORKS drawing macro
+'
+' Makes every view name belong to its own view, so it moves with that view
+' (and not with another view or with the sheet background).
+'   1. Existing view names (notes whose first line contains "VIEW") are matched to the
+'      nearest view. A name that belongs to another view or to the sheet is re-created
+'      inside its own view - same text, font, position and layer - and the old one deleted.
+'   2. Views that have no name get one, centred above the view:
+'        FRONT VIEW for the main view; TOP / BOTTOM / SIDE / LEFT SIDE VIEW for projected views
+'        (from where they sit next to the main view); ISOMETRIC, EXPLODED ISOMETRIC,
+'        FLAT PATTERN or AUXILIARY VIEW,
+'      plus "SCALE 1:2" when the view scale differs from the sheet scale.
+'      Century Gothic 13 pt, black, on the "Text" layer.
+'   Section and detail views are skipped (SOLIDWORKS labels them itself).
+' Works on the current sheet. The drawing is not saved.
+
+Option Explicit
+
+Const TITLE As String = "View Labels"
+Const MAX_DIST As Double = 30        ' mm: a name further than this from every view is ignored
+Const FONT_NAME As String = "Century Gothic"
+Const FONT_PTS As Double = 13
+Const LAYER_NAME As String = "Text"
+
+Dim swApp As Object, swModel As Object
+Dim vw() As Object, vx0() As Double, vy0() As Double, vx1() As Double, vy1() As Double, vHas() As Boolean, nv As Long
+
+Sub main()
+    On Error GoTo failed
+    Set swApp = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
+    If swModel Is Nothing Then
+        MsgBox "Open a drawing first.", vbExclamation, TITLE: Exit Sub
+    End If
+    If swModel.GetType <> 3 Then
+        MsgBox "The active document is not a drawing.", vbExclamation, TITLE: Exit Sub
+    End If
+
+    ' ---- views of the current sheet and their outlines (sheet mm) ----
+    Dim v As Object, o As Variant
+    nv = 0
+    ReDim vw(0): ReDim vx0(0): ReDim vy0(0): ReDim vx1(0): ReDim vy1(0): ReDim vHas(0)
+    Set v = swModel.GetFirstView.GetNextView
+    Do While Not v Is Nothing
+        ReDim Preserve vw(nv): ReDim Preserve vx0(nv): ReDim Preserve vy0(nv)
+        ReDim Preserve vx1(nv): ReDim Preserve vy1(nv): ReDim Preserve vHas(nv)
+        Set vw(nv) = v
+        o = v.GetOutline
+        vx0(nv) = o(0) * 1000: vy0(nv) = o(1) * 1000: vx1(nv) = o(2) * 1000: vy1(nv) = o(3) * 1000
+        nv = nv + 1
+        Set v = v.GetNextView
+    Loop
+    If nv = 0 Then
+        MsgBox "No drawing views on this sheet.", vbExclamation, TITLE: Exit Sub
+    End If
+
+    ' ---- collect the existing view names (owned by the sheet or by any view) ----
+    Dim lbl() As Object, lOwner() As String, nl As Long, owner As Object, ownerName As String, k As Long
+    ReDim lbl(0): ReDim lOwner(0)
+    For k = -1 To nv - 1
+        If k = -1 Then
+            Set owner = swModel.GetFirstView: ownerName = swModel.GetCurrentSheet.GetName
+        Else
+            Set owner = vw(k): ownerName = vw(k).Name
+        End If
+        Dim nt As Object
+        Set nt = owner.GetFirstNote
+        Do While Not nt Is Nothing
+            If IsViewName(nt.GetText) Then
+                ReDim Preserve lbl(nl): ReDim Preserve lOwner(nl)
+                Set lbl(nl) = nt: lOwner(nl) = ownerName
+                nl = nl + 1
+            End If
+            Set nt = nt.GetNext
+        Loop
+    Next k
+
+    ' ---- 1. attach each existing name to its nearest view ----
+    Dim i As Long, best As Long, moved As Long, kept As Long, made As Long, report As String
+    Dim p As Variant
+    For i = 0 To nl - 1
+        p = lbl(i).GetTextPoint2
+        best = NearestView(p(0) * 1000, p(1) * 1000)
+        If best >= 0 Then
+            If Not vHas(best) Then
+                vHas(best) = True
+                If lOwner(i) = vw(best).Name Then
+                    kept = kept + 1
+                Else
+                    If MoveNote(lbl(i), lOwner(i), vw(best)) Then
+                        moved = moved + 1
+                        report = report & vbCrLf & "  moved to " & vw(best).Name & ":  " & FirstLine(lbl(i).GetText)
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    ' ---- 2. new names for views that have none ----
+    Dim nm As String
+    For i = 0 To nv - 1
+        If Not vHas(i) And vw(i).Type <> 2 And vw(i).Type <> 3 Then   ' not section / detail
+            nm = ViewName(vw(i))
+            AddLabel vw(i), nm, i
+            made = made + 1
+            report = report & vbCrLf & "  added to " & vw(i).Name & ":  " & Replace(nm, vbCrLf, " / ")
+        End If
+    Next i
+
+    swModel.ClearSelection2 True
+    swModel.GraphicsRedraw2
+    MsgBox moved & " view name(s) moved into their own view, " & made & " added, " & kept & " already correct." & _
+           report & vbCrLf & vbCrLf & "Save the drawing to keep the changes.", vbInformation, TITLE
+    Exit Sub
+failed:
+    MsgBox "Stopped by an error: " & Err.Description & " (" & Err.Number & ")", vbExclamation, TITLE
+End Sub
+
+' ---------------------------------------------------------------------------------------
+Private Function IsViewName(t As String) As Boolean
+    IsViewName = (InStr(1, UCase(FirstLine(t)), "VIEW") > 0)
+End Function
+
+Private Function FirstLine(t As String) As String
+    Dim k As Long
+    k = InStr(t, vbCr)
+    If k = 0 Then k = InStr(t, vbLf)
+    If k > 0 Then FirstLine = Left(t, k - 1) Else FirstLine = t
+End Function
+
+' index of the view whose outline is closest to (x, y) mm, or -1 if none within MAX_DIST
+Private Function NearestView(x As Double, y As Double) As Long
+    Dim i As Long, dx As Double, dy As Double, d As Double, bestD As Double
+    NearestView = -1: bestD = MAX_DIST
+    For i = 0 To nv - 1
+        dx = 0: dy = 0
+        If x < vx0(i) Then
+            dx = vx0(i) - x
+        ElseIf x > vx1(i) Then
+            dx = x - vx1(i)
+        End If
+        If y < vy0(i) Then
+            dy = vy0(i) - y
+        ElseIf y > vy1(i) Then
+            dy = y - vy1(i)
+        End If
+        d = Sqr(dx * dx + dy * dy)
+        If d <= bestD Then bestD = d: NearestView = i
+    Next i
+End Function
+
+' re-create the note inside view v (same text, format, justification, layer, colour, position)
+' and delete the original. True if done.
+Private Function MoveNote(old As Object, oldOwner As String, v As Object) As Boolean
+    Dim oa As Object, pos As Variant, tf As Object, txt As String, just As Long, lay As String, col As Long, oldName As String
+    Set oa = old.GetAnnotation
+    pos = oa.GetPosition
+    Set tf = oa.GetTextFormat(0)
+    txt = old.GetText: just = old.GetTextJustification
+    lay = oa.Layer: col = oa.Color: oldName = old.GetName
+
+    swModel.ClearSelection2 True
+    swModel.ActivateView v.Name                 ' a new note belongs to the active view
+    Dim n As Object, a As Object
+    Set n = swModel.InsertNote(txt)
+    If n Is Nothing Then Exit Function
+    Set a = n.GetAnnotation
+    a.SetTextFormat 0, False, tf
+    n.SetTextJustification just
+    On Error Resume Next
+    a.Layer = lay
+    a.Color = col
+    On Error GoTo 0
+    a.SetPosition2 pos(0), pos(1), 0
+
+    swModel.ClearSelection2 True
+    If swModel.Extension.SelectByID2(oldName & "@" & oldOwner, "NOTE", 0, 0, 0, False, 0, Nothing, 0) Then
+        swModel.Extension.DeleteSelection2 0
+    End If
+    swModel.ClearSelection2 True
+    MoveNote = True
+End Function
+
+' ---------------------------------------------------------------------------------------
+' Name for a view, with a SCALE line when it differs from the sheet scale.
+' Named the way the drawing is laid out: the main model view is the FRONT VIEW, and a projected
+' view is named by where it sits next to its parent (below = BOTTOM, above = TOP, right = SIDE).
+Private Function ViewName(v As Object) As String
+    Dim nm As String, a As Variant, i As Long, best As Long, z(2) As Double
+    If v.IsFlatPatternView Then
+        nm = "FLAT PATTERN VIEW"
+    ElseIf v.IsExploded Then
+        nm = "EXPLODED ISOMETRIC VIEW"
+    ElseIf v.Type = 5 Then                              ' auxiliary
+        nm = "AUXILIARY VIEW"
+    Else
+        a = v.ModelToViewTransform.ArrayData
+        z(0) = a(2): z(1) = a(5): z(2) = a(8)          ' viewing direction in model axes
+        best = 0
+        For i = 1 To 2
+            If Abs(z(i)) > Abs(z(best)) Then best = i
+        Next i
+        If Abs(z(best)) < 0.99 Then
+            nm = "ISOMETRIC VIEW"
+        ElseIf v.Type = 4 Then                          ' projected: where is it relative to its parent?
+            Dim bv As Object, bo As Variant, vo As Variant, dx As Double, dy As Double
+            Set bv = v.GetBaseView
+            If bv Is Nothing Then
+                nm = "PROJECTED VIEW"
+            Else
+                bo = bv.GetOutline: vo = v.GetOutline
+                dx = (vo(0) + vo(2)) / 2 - (bo(0) + bo(2)) / 2
+                dy = (vo(1) + vo(3)) / 2 - (bo(1) + bo(3)) / 2
+                If Abs(dy) > Abs(dx) Then
+                    nm = IIf(dy > 0, "TOP VIEW", "BOTTOM VIEW")
+                Else
+                    nm = IIf(dx > 0, "SIDE VIEW", "LEFT SIDE VIEW")
+                End If
+            End If
+        Else
+            nm = "FRONT VIEW"                           ' main (model) view
+        End If
+    End If
+
+    Dim vs As Variant, sp As Variant
+    vs = v.ScaleRatio
+    sp = swModel.GetCurrentSheet.GetProperties2
+    If Abs(vs(0) / vs(1) - sp(2) / sp(3)) > 0.000001 Then
+        nm = nm & vbCrLf & "SCALE " & Fmt(vs(0)) & ":" & Fmt(vs(1))
+    End If
+    ViewName = nm
+End Function
+
+Private Function Fmt(x As Variant) As String
+    If Abs(x - Round(x)) < 0.000001 Then Fmt = CStr(Round(x)) Else Fmt = CStr(x)
+End Function
+
+' new name centred above the view (above its dimensions too), or below it if there is no room
+Private Sub AddLabel(v As Object, nm As String, idx As Long)
+    Dim top As Double, bot As Double, anns As Variant, i As Long, ps As Variant, lines As Long, y As Double
+    top = vy1(idx): bot = vy0(idx)
+    anns = v.GetAnnotations
+    If Not IsEmpty(anns) Then
+        For i = LBound(anns) To UBound(anns)
+            If anns(i).GetType <> 6 Then                   ' not notes: dimensions etc.
+                ps = anns(i).GetPosition
+                If Not IsEmpty(ps) Then
+                    If ps(0) * 1000 > vx0(idx) - 5 And ps(0) * 1000 < vx1(idx) + 5 Then
+                        If ps(1) * 1000 + 2 > top Then top = ps(1) * 1000 + 2
+                        If ps(1) * 1000 - 4 < bot Then bot = ps(1) * 1000 - 4
+                    End If
+                End If
+            End If
+        Next i
+    End If
+    lines = UBound(Split(nm, vbCrLf)) + 1
+
+    ' above the view; below it if there is no room above (sheet border ~12 mm from the edge)
+    Dim sp As Variant
+    sp = swModel.GetCurrentSheet.GetProperties2
+    y = top + 4 + lines * 5.5                         ' note position = top of the text
+    If y > sp(6) * 1000 - 12 Then y = bot - 4
+
+    swModel.ClearSelection2 True
+    swModel.ActivateView v.Name                    ' the name belongs to this view
+    Dim n As Object, a As Object, tf As Object
+    Set n = swModel.InsertNote(nm)
+    If n Is Nothing Then Exit Sub
+    Set a = n.GetAnnotation
+    Set tf = a.GetTextFormat(0)
+    tf.TypeFaceName = FONT_NAME
+    tf.CharHeightInPts = FONT_PTS
+    a.SetTextFormat 0, False, tf
+    n.SetTextJustification 2                       ' centred
+    On Error Resume Next
+    If Not swModel.GetLayerManager.GetLayer(LAYER_NAME) Is Nothing Then a.Layer = LAYER_NAME
+    a.Color = 0
+    On Error GoTo 0
+    ' note position = top centre of the text
+    a.SetPosition2 (vx0(idx) + vx1(idx)) / 2000, y / 1000, 0
+    swModel.ClearSelection2 True
+End Sub

@@ -9,6 +9,8 @@ SOLIDWORKS macros for engineering drawings.
 | [ManufacturingTables](#manufacturingtables) | Makes one manufacturing table (.xlsx) per part, filled with the part name, drawing name and material |
 | [SymmetryCenterlines](#symmetrycenterlines) | Finds symmetric views and adds a black centre line with the centre-line symbol |
 | [UpdateSheetNumber](#updatesheetnumber) | Writes the sheet number (01, 02, ...) into the title block of every sheet |
+| [ViewLabels](#viewlabels) | Makes every view name belong to its own view (so it moves with it) and adds missing names |
+| [FillTitleBlock](#filltitleblock) | Fills the title block from a template file (`TitleBlockTemplate.txt`) |
 
 Each macro comes as three files in the `macros` folder:
 
@@ -88,6 +90,51 @@ Writes the sheet number into the title block of every sheet: sheet 1 → `01`, s
 3. A message lists each sheet and its number.
 
 Run it again after adding, deleting or reordering sheets. The drawing is not saved.
+
+Tested on SOLIDWORKS 2026.
+
+## ViewLabels
+
+> The `.swp` for this macro isn't in the repository yet. Until it is, run `ViewLabels.swb` (Tools → Macro → Run, file type *SW VBA Macros (\*.swp; \*.swb)*).
+
+Makes every view name belong to **its own view**, so dragging a view moves its name with it (and nothing else).
+
+1. Open a drawing and run the macro (it works on the current sheet).
+2. **Existing names** (notes whose first line contains "VIEW") are matched to the nearest view. A name that belongs to another view or to the sheet is re-created inside its own view with the same text, font, position and layer, and the old one is deleted.
+3. **Views without a name** get one, centred above the view (below it if there's no room above):
+   - **FRONT VIEW** for the main view; **TOP / BOTTOM / SIDE / LEFT SIDE VIEW** for projected views, from where they sit next to the main view;
+   - **ISOMETRIC**, **EXPLODED ISOMETRIC**, **FLAT PATTERN** or **AUXILIARY VIEW**;
+   - plus a `SCALE 1:2` line when the view scale differs from the sheet scale;
+   - Century Gothic 13 pt, black, on the **Text** layer.
+
+Section and detail views are skipped (SOLIDWORKS names them itself). Safe to run again. The drawing is not saved.
+
+Tested on SOLIDWORKS 2026.
+
+## FillTitleBlock
+
+> The `.swp` for this macro isn't in the repository yet. Until it is, run `FillTitleBlock.swb` (Tools → Macro → Run, file type *SW VBA Macros (\*.swp; \*.swb)*).
+
+Fills in the title block (bottom right table) of every sheet from a **template file**.
+
+1. Put [`TitleBlockTemplate.txt`](macros/TitleBlockTemplate.txt) in the drawing's folder or next to the macro, and edit it in Notepad. One line per box:
+
+   ```
+   Description = {partname}
+   Material = {material}
+   Approx Weight = {mass}
+   Drawn by = Ramitha D. & Sankalpa
+   Drawn Date = {date}
+   Sheet = {sheet}
+   ```
+
+   The label is the heading printed in the title block (without the colon). The value is fixed text and/or fields filled in from SOLIDWORKS: `{partname}`, `{material}`, `{mass}` (kg), `{date}` (yyyy/mm/dd), `{sheet}` (01, 02, ...), `{sheets}`, `{scale}`, `{sheetsize}`, `{filename}`.
+2. Open a drawing and run the macro. If no template is found, it asks you to pick one.
+3. For each label it finds the heading in the title block and fills the box next to it (right of it or below it), keeping that box's font. If the text is too long for the box, it is made smaller until it fits (also for text that was already there).
+
+With `REMOVE PROJECTION = yes` in the template it also clears the **THIRD ANGLE** text and the projection symbol from the Projection Method box.
+
+By default it **only fills empty boxes**, so text you typed is kept. To replace existing values too, set `OVERWRITE = yes` in the template. A message lists every box and what was done. The drawing is not saved.
 
 Tested on SOLIDWORKS 2026.
 

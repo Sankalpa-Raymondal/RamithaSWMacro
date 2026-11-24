@@ -1,0 +1,30 @@
+; Title block template for the FillTitleBlock macro
+;
+; One line per title block box:   Label = value
+;   Label = the heading printed in the title block, without the colon (e.g. "Drawn by").
+;   value = fixed text, and/or fields that the macro fills in from SOLIDWORKS:
+;     {partname}   name of the part/assembly shown in the drawing
+;     {material}   its SOLIDWORKS material
+;     {mass}       its mass in kg (2 decimals)
+;     {date}       today's date, yyyy/mm/dd
+;     {sheet}      this sheet's number (01, 02, ...)
+;     {sheets}     number of sheets
+;     {scale}      sheet scale (e.g. 1:3)
+;     {sheetsize}  paper size (e.g. A3)
+;     {filename}   drawing file name
+;
+; Text too long for its box is made smaller automatically so it fits.
+;
+; The macro only fills EMPTY boxes, so text you typed yourself is kept.
+; To replace existing values too, change the next line to:  OVERWRITE = yes
+OVERWRITE = no
+
+; Clear "THIRD ANGLE" and the projection symbol from the Projection Method box (yes / no)
+REMOVE PROJECTION = yes
+
+Description = {partname}
+Material = {material}
+Approx Weight = {mass}
+Drawn by = Ramitha D. & Sankalpa
+Drawn Date = {date}
+Sheet = {sheet}
